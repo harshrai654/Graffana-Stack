@@ -1,0 +1,93 @@
+loki.source.file "log_scrape" {
+   targets    = [
+    {__path__ = "/var/log/server.log", "color" = "green", "label" = "backend-service_harsh-development"},
+    {__path__ = "/var/log/processor-service.log", "color" = "blue", "label" = "processor_service_harsh-development"},
+    {__path__ = "/var/log/cron-jobs.log", "color" = "grey", "label" = "cron_jobs_harsh-development"},
+  ] 
+   forward_to = [loki.write.grafana_loki.receiver]
+   tail_from_end = true
+}
+
+loki.write "grafana_loki" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+prometheus.scrape "prometheus" {
+  targets = [{
+    __address__ = "host.docker.internal:4523",
+  }]
+  job_name       = "backend-koinx-prometheus"
+  scrape_interval = "15s"
+  extra_metrics = true
+  forward_to = [prometheus.remote_write.metrics_service.receiver]
+}
+
+prometheus.remote_write "metrics_service" {
+    endpoint {
+        url = "http://prometheus:9090/api/v1/write"
+    }
+}
+
+otelcol.receiver.otlp "default" {
+	grpc { }
+
+	http { }
+
+	output {
+		traces = [otelcol.processor.attributes.default_update.input]
+	}
+}
+
+otelcol.processor.attributes "default_update" {
+	action {
+		key    = "request.body.password"
+		value  = "redacted"
+		action = "update"
+	}
+
+	output {
+		traces = [otelcol.processor.batch.default.input]
+	}
+}
+
+otelcol.processor.batch "default" {
+	timeout             = "5s"
+	send_batch_size     = 100
+	send_batch_max_size = 1000
+
+	output {
+		traces = [otelcol.exporter.otlp.default.input]
+	}
+}
+
+otelcol.exporter.otlp "default" {
+	client {
+		endpoint = "tempo:4317"
+
+		tls {
+			insecure = true
+		}
+	}
+}
+
+discovery.docker "local_containers" {
+ host = "unix:///var/run/docker.sock"
+}
+
+pyroscope.ebpf "instance" {
+ forward_to     = [pyroscope.write.endpoint.receiver]
+ targets = discovery.docker.local_containers.targets
+}
+
+
+pyroscope.write "endpoint" {
+ endpoint {
+  url = "pyroscope:4040"
+ }
+ external_labels = {
+  "env"      = "testing",
+  "instance" = env("HOSTNAME"),
+ }
+}

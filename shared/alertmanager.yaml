@@ -1,0 +1,126 @@
+config:
+  global:
+    resolve_timeout: 5m
+    # slack_api_url: SLACK_API_URL is provided in the SealedSecret named kube-prometheus-secrets
+  receivers:
+    - name: "null"
+    - name: "healthchecks.io"
+    - name: "slack"
+      slack_configs:
+        - channel: "#team-sre-notifications"
+          send_resolved: true
+          title: |
+            [{{ title .GroupLabels.env }}] {{ if ne .Status "firing" -}}
+              :heavy_check_mark:
+            {{- else if eq .CommonLabels.severity "critical" -}}
+              :fire:
+            {{- else if eq .CommonLabels.severity "warning" -}}
+              :warning:
+            {{- else if eq .CommonLabels.severity "info" -}}
+              :information_source:
+            {{- else -}}
+              :question:
+            {{- end -}}
+            {{ .CommonLabels.alertname }} - {{ .CommonAnnotations.summary }}
+          text: >-
+            {{ range .Alerts }}
+              {{- if .Annotations.message }}
+                {{ .Annotations.message }}
+              {{- end }}
+              {{- if .Annotations.description }}
+                {{ .Annotations.description }}
+              {{- end }}
+            {{- end }}
+          short_fields: true
+          fields:
+            - title: Severity
+              value: "{{ .CommonLabels.severity }}"
+            - title: Job
+              value: "{{ .GroupLabels.job }}"
+            - title: "Firing #"
+              value: '{{ if eq .Status "firing" }}{{ .Alerts.Firing | len }}{{- end -}}'
+          actions:
+            - type: button
+              text: "Runbook :green_book:"
+              url: "{{ .CommonAnnotations.runbook_url }}"
+            - type: button
+              text: "Query :mag:"
+              url: "{{ (index .Alerts 0).GeneratorURL }}"
+            - type: button
+              text: "Dashboard :grafana:"
+              url: "{{ .CommonAnnotations.dashboard_url }}"
+            - type: button
+              text: "Silence :no_bell:"
+              url: >-
+                {{ .ExternalURL }}/#/silences/new?filter=%7B
+                {{- range .CommonLabels.SortedPairs -}}
+                    {{- if ne .Name "alertname" -}}
+                        {{- .Name }}%3D%22{{- reReplaceAll " +" "%20" .Value -}}%22%2C%20
+                    {{- end -}}
+                {{- end -}}
+                alertname%3D%22{{ reReplaceAll " +" "%20" .CommonLabels.alertname }}%22%7D
+  inhibit_rules:
+    - source_matchers:
+        - "severity = critical"
+      target_matchers:
+        - "severity =~ warning|info"
+      equal:
+        - "namespace"
+        - "alertname"
+    - source_matchers:
+        - "severity = warning"
+      target_matchers:
+        - "severity = info"
+      equal:
+        - "namespace"
+        - "alertname"
+    - source_matchers:
+        - "alertname = InfoInhibitor"
+      target_matchers:
+        - "severity = info"
+      equal:
+        - "namespace"
+  route:
+    group_by: ["alertname", "instance", "job", "env"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 12h
+    receiver: "slack"
+    routes:
+      - receiver: "null"
+        matchers:
+          - alertname =~ "InfoInhibitor|Watchdog"
+      # This will disable alert notifications on slack for development environment.
+      - receiver: "null"
+        matchers:
+          - env = "development"
+      - receiver: "healthchecks.io"
+        matchers:
+          - "alertname = Watchdog"
+        repeat_interval: 2m
+        group_interval: 2m
+
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/auth-signin: https://auth.sre.dev.koinx.com/oauth2/start?rd=$scheme://$host$escaped_request_uri
+    nginx.ingress.kubernetes.io/auth-url: https://auth.sre.dev.koinx.com/oauth2/auth
+  hosts:
+    # domain is defined in alertmanager.alertmanagerSpec.externalUrl
+    - &alertmanagerDomain alertmanager.sre.dev.koinx.com
+  paths:
+    - /
+  tls:
+    - secretName: alertmanager-tls
+      hosts:
+        - *alertmanagerDomain
+
+## Settings affecting alertmanagerSpec
+## ref: https://github.com/prometheus-operator/prometheus-operator/blob/main/Documentation/api.md#alertmanagerspec
+##
+alertmanagerSpec:
+  ## The external URL the Alertmanager instances will be available under. This is necessary to generate correct URLs. This is necessary if Alertmanager is not served from root of a DNS name. string  false
+  ##
+  externalUrl: https://alertmanager.sre.dev.koinx.com

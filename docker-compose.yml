@@ -1,0 +1,129 @@
+services:
+  # Tempo runs as user 10001, and docker compose creates the volume as root.
+  # As such, we need to chown the volume in order for Tempo to start correctly.
+  init:
+    image: &tempoImage grafana/tempo:latest
+    user: root
+    entrypoint:
+      - "chown"
+      - "10001:10001"
+      - "/var/tempo"
+    volumes:
+      - ./shared/tempo-data:/var/tempo
+
+  tempo:
+    image: *tempoImage
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./shared/tempo.yaml:/etc/tempo.yaml
+      - ./shared/tempo-data:/var/tempo
+    ports:
+      - "14268" # jaeger ingest
+      - "3200" # tempo
+      - "4317" # otlp grpc
+      - "4318" # otlp http
+      - "9411" # zipkin
+    depends_on:
+      - init
+
+  # otel-collector:
+  #   image: otel/opentelemetry-collector-contrib
+  #   command: ["--config=/etc/otel-collector.yaml"]
+  #   volumes:
+  #     - ./shared/otel-collector.yaml:/etc/otel-collector.yaml
+  #   env_file:
+  #     - path: ./shared/env/otel_collector.env
+  #       required: true
+
+  #   ports:
+  #     - "4317:4317"
+  #     - "4318:4318"
+  #   depends_on:
+  #     - tempo
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus.yaml
+      - --enable-feature=exemplar-storage
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./shared/prometheus.yaml:/etc/prometheus.yaml
+    ports:
+      - "9090:9090"
+
+  # alert-manager:
+  #   image: prom/alertmanager
+  #   command:
+  #     - --config.file=/etc/alertmanager.yaml
+  #   volumes:
+  #     - ./shared/alertmanager.yaml:/etc/alertmanager.yaml
+  #   ports:
+  #     - "9093:9093"
+
+  loki:
+    image: grafana/loki:2.9.2
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+
+  # promtail:
+  #   image: grafana/promtail:2.9.2
+  #   volumes:
+  #     - ./shared/server.log:/var/log/server.log
+  #     - ./shared/processor_service.log:/var/log/processor-service.log
+  #     - ./shared/cron_jobs.log:/var/log/cron-jobs.log
+  #     - ./shared/promtail-config.yml:/etc/promtail/config.yml
+  #   command: -config.file=/etc/promtail/config.yml
+  #   ports:
+  #     - "9080:9080"
+
+  pyroscope:
+    image: grafana/pyroscope:latest
+    ports:
+      - "4040:4040"
+
+  # parca:
+  #   image: ghcr.io/parca-dev/parca:v0.21.0
+  #   ports:
+  #     - "7070:7070"
+  #   volumes:
+  #     - ./shared/parca-config.yml:/etc/parca/config.yml
+  #   command: /parca --config-path=/etc/parca/config.yml
+
+  alloy:
+    image: grafana/alloy:latest
+    volumes:
+      - ./shared/alloy-config.alloy:/etc/alloy/config.alloy
+      - ./shared/otel-collector.yaml:/etc/alloy/otel-collector.yaml
+      - ./shared/otel-collector-alloy.yaml:/etc/alloy/otel-collector.yaml
+      - ./shared/logs/server.log:/var/log/server.log
+      - ./shared/logs/processor_service.log:/var/log/processor-service.log
+      - ./shared/logs/cron_jobs.log:/var/log/cron-jobs.log
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "12345:12345"
+      - "4317:4317"
+      - "4318:4318"
+    pid: host
+    privileged: true
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+
+    environment:
+      - AGENT_MODE=flow
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    volumes:
+      - ./shared/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,flameGraph
+    ports:
+      - "3000:3000"
